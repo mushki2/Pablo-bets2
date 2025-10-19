@@ -113,3 +113,99 @@ SUPABASE_DB_URL="postgresql://user:password@host:port/dbname"
 -   Schedule the task to run every **5-10 minutes**.
 
 The Strategic Oracle is now deployed and operational.
+
+---
+
+## Deployment on a VPS with Docker (Recommended)
+
+For a more flexible and scalable deployment, you can run the bot on any Virtual Private Server (VPS) using Docker.
+
+### 1. Prerequisites
+
+-   A VPS running a modern Linux distribution (e.g., Ubuntu 22.04).
+-   Docker and Docker Compose installed on the VPS.
+-   A domain name pointed at your VPS's IP address.
+-   Nginx installed on the VPS.
+
+### 2. Setup
+
+1.  **Clone the Repository:**
+    ```bash
+    git clone <repository_url>
+    cd sports_bot
+    ```
+
+2.  **Configure Environment Variables:**
+    Create a `.env` file and fill it with your API keys, Supabase URL, and your domain name for the webhook.
+    ```
+    # .env file
+    # ... (copy all your keys here)
+    PA_USERNAME="your.domain.com" # Replace with your domain
+    ```
+
+3.  **Build and Run the Docker Container:**
+    Use Docker Compose to build the image and run the container in detached mode.
+    ```bash
+    docker-compose up --build -d
+    ```
+    Your bot is now running inside a Docker container, with the Flask application served by Gunicorn on port 8000.
+
+### 3. Configure Nginx as a Reverse Proxy
+
+To securely expose your bot to the internet and enable HTTPS, configure Nginx to proxy requests to the Docker container.
+
+1.  **Create a new Nginx configuration file:**
+    ```bash
+    sudo nano /etc/nginx/sites-available/strategic-oracle-bot
+    ```
+
+2.  **Add the following server block**, replacing `your.domain.com` with your actual domain:
+    ```nginx
+    server {
+        listen 80;
+        server_name your.domain.com;
+
+        location / {
+            proxy_pass http://127.0.0.1:8000;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
+    }
+    ```
+
+3.  **Enable the site and restart Nginx:**
+    ```bash
+    sudo ln -s /etc/nginx/sites-available/strategic-oracle-bot /etc/nginx/sites-enabled/
+    sudo nginx -t
+    sudo systemctl restart nginx
+    ```
+
+4.  **Enable HTTPS with Certbot (Let's Encrypt):**
+    Install Certbot and have it automatically configure SSL for your domain.
+    ```bash
+    sudo apt install certbot python3-certbot-nginx
+    sudo certbot --nginx -d your.domain.com
+    ```
+    Certbot will obtain the SSL certificate and automatically update your Nginx configuration to handle HTTPS traffic.
+
+### 4. Set the Telegram Webhook
+
+-   Update Telegram with your new, secure webhook URL:
+    ```bash
+    curl -X GET "https://api.telegram.org/bot<YOUR_TELEGRAM_BOT_TOKEN>/setWebhook?url=https://your.domain.com/webhook"
+    ```
+
+### 5. Create the Cron Job for the Worker
+
+-   Finally, set up a cron job on your VPS to run the analysis worker script inside the container.
+-   Open the crontab editor:
+    ```bash
+    crontab -e
+    ```
+-   Add the following line to run the worker every 5 minutes:
+    ```
+    */5 * * * * docker exec strategic-oracle-bot python run_analysis_worker.py
+    ```
+
+Your bot is now fully deployed and operational on your VPS.
