@@ -29,22 +29,33 @@ def get_ai_prediction(home_team, away_team, odds_data, sentiment_summary, histor
     formatted_odds = json.dumps(odds_data, indent=2)
 
     prompt = f"""
-    Analyze the upcoming match between {home_team} and {away_team}.
+    **Role:** You are a sophisticated sports betting analyst AI. Your task is to provide a detailed, data-driven prediction for an upcoming match.
 
-    Here is the data I've gathered:
+    **Match:** {home_team} vs {away_team}
 
-    1.  **Live Odds:**
+    **Input Data:**
+    1.  **Live Market Odds:**
+        ```json
         {formatted_odds}
+        ```
+    2.  **Public Sentiment Analysis (from Twitter):**
+        - {sentiment_summary}
+    3.  **Historical Context (from Wikipedia):**
+        - {historical_summary}
 
-    2.  **Recent Twitter Sentiment:**
-        {sentiment_summary}
+    **Output Format (Strict JSON):**
+    You must return your analysis in a single JSON object. Do not include any text outside of this JSON object. The structure must be exactly as follows:
+    {{
+      "prediction": "The team you predict will win, or 'Draw'.",
+      "reasoning": "A step-by-step, data-driven explanation for your prediction. Reference the odds, sentiment, and historical context.",
+      "confidence_score": "A percentage (e.g., '78%') representing your confidence in the prediction.",
+      "risk_level": "Your assessment of the risk involved in this bet. Must be one of: 'Low', 'Medium', or 'High'."
+    }}
 
-    3.  **Historical Performance Summary:**
-        {historical_summary}
-
-    **Your Task:**
-    Based on all the provided data (odds, public sentiment, and historical performance), please provide a confident prediction for the match outcome.
-    Explain your reasoning in a clear, step-by-step manner. Conclude with a final prediction on the likely winner.
+    **Instructions:**
+    -   **Analyze all data points:** Synthesize the market odds, public sentiment, and historical performance to form a holistic view.
+    -   **Confidence Score:** Base this on the alignment of the data. High confidence comes from data points that all suggest a similar outcome. Low confidence results from conflicting data (e.g., strong history but poor odds and negative sentiment).
+    -   **Risk Level:** Assess this based on the odds and the potential for an upset. Low odds on a clear favorite is 'Low' risk. Close odds or a history of upsets indicates 'Medium' or 'High' risk.
     """
 
     headers = {"Content-Type": "application/json"}

@@ -8,7 +8,7 @@ import telegram
 import utils
 import wikipedia_data
 import apify_scraper
-import gemini_brain
+import prediction_core
 
 # Load environment variables
 load_dotenv()
@@ -52,7 +52,7 @@ def run_analysis_pipeline(match_details):
     odds_for_ai = utils.format_odds_for_ai(match_details.get('bookmakers', []))
 
     # 4. Get the final prediction from Gemini AI
-    prediction = gemini_brain.get_ai_prediction(
+    prediction = prediction_core.get_ai_prediction(
         home_team=home_team,
         away_team=away_team,
         odds_data=odds_for_ai,
@@ -60,12 +60,27 @@ def run_analysis_pipeline(match_details):
         historical_summary=historical_summary,
     )
 
-    # 5. Format the final result message
-    result_message = (
-        f"--- **AI Analysis Result** ---\n\n"
-        f"**Match:** {home_team} vs {away_team}\n\n"
-        f"{prediction}"
-    )
+    # 5. Parse the AI's JSON output and format the final message
+    try:
+        # Clean the response to ensure it's valid JSON
+        cleaned_prediction_str = prediction.strip().replace('```json', '').replace('```', '')
+        ai_data = json.loads(cleaned_prediction_str)
+
+        result_message = (
+            f"--- **Outcome Projection Received** ---\n\n"
+            f"**Event:** {home_team} vs {away_team}\n\n"
+            f"**Prediction:** {ai_data.get('prediction', 'N/A')}\n"
+            f"**Confidence Score:** {ai_data.get('confidence_score', 'N/A')}\n"
+            f"**Assessed Risk Level:** {ai_data.get('risk_level', 'N/A')}\n\n"
+            f"**Oracle's Reasoning:**\n{ai_data.get('reasoning', 'No reasoning provided.')}"
+        )
+    except (json.JSONDecodeError, AttributeError):
+        # Fallback for non-JSON or malformed responses
+        result_message = (
+            f"--- **Oracle Transmission Error** ---\n\n"
+            f"The Oracle's response for **{home_team} vs {away_team}** was inconclusive or malformed.\n\n"
+            f"Raw output: {prediction}"
+        )
 
     return result_message
 
