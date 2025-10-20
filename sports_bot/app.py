@@ -3,95 +3,78 @@ import asyncio
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 import telegram
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    filters,
-)
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 
-# Import bot handlers
-from handlers import start, button_callback_handler
+import utils
+from handlers import start, button_callback_handler, setup_conversation
 
-# Load environment variables from .env file
+# --- Bootstrap Environment ---
 load_dotenv()
-
-# --- Configuration ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-PA_USERNAME = os.getenv("PA_USERNAME") # Your PythonAnywhere username
-WEBHOOK_URL = f"https://{PA_USERNAME}.pythonanywhere.com/webhook"
 
 # --- Flask App Initialization ---
 app = Flask(__name__)
 
-# --- Telegram Bot Setup ---
-# Initialize the bot application
-application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+# --- Telegram Bot Application Setup ---
+async def main_setup():
+    """
+    Performs a two-stage setup:
+    1. Bootstrap: Starts the bot with the essential token from the .env file.
+    2. Full Config Load: Loads the rest of the config from the database into bot_data.
+    """
+    # Stage 1: Bootstrap with the essential token
+    bootstrap_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not bootstrap_token:
+        raise ValueError("CRITICAL: TELEGRAM_BOT_TOKEN is not set in the .env file. The bot cannot start.")
 
-# Register handlers
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CallbackQueryHandler(button_callback_handler))
+    application = Application.builder().token(bootstrap_token).build()
+
+    # Stage 2: Load full configuration from the database into the bot's context
+    # This makes the config accessible to all handlers via context.bot_data
+    full_config = utils.get_all_settings()
+    application.bot_data.update(full_config)
+    print("Successfully loaded configuration from the database.")
+
+    # Register all handlers
+    application.add_handler(setup_conversation)
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_callback_handler))
+
+    # Set the webhook
+    # Use PA_USERNAME from .env for webhook setup, as it might not be in the DB yet
+    pa_username = os.getenv("PA_USERNAME")
+    if pa_username:
+        webhook_url = f"https://{pa_username}.pythonanywhere.com/webhook"
+        await application.bot.set_webhook(url=webhook_url)
+        print(f"Webhook set successfully to: {webhook_url}")
+    else:
+        print("PA_USERNAME not found in .env, skipping webhook setup. (This is normal for local dev).")
+
+    return application
+
+# Initialize the application
+application = asyncio.run(main_setup())
 
 # --- Flask Routes ---
 @app.route("/")
 def index():
-    """A simple route to confirm the web app is running (for UptimeRobot)."""
-    return "<h1>Bot is running!</h1><p>This is the endpoint for the keep-alive service.</p>"
+    """A simple route to confirm the web app is running."""
+    return "<h1>Strategic Oracle Bot is running!</h1>"
 
 @app.route("/webhook", methods=["POST"])
-async def webhook():
+def webhook():
     """
-    This endpoint receives updates from Telegram.
-    It processes the update with the python-telegram-bot library.
+    Receives updates from Telegram and processes them.
+    This is a synchronous endpoint that uses asyncio.run() to bridge
+    to the async python-telegram-bot library.
     """
+    if not application:
+        print("Error: Bot application not initialized.")
+        return jsonify(ok=False, error="Bot not initialized"), 500
+
     if request.is_json:
-        update_data = request.get_json()
-        update = telegram.Update.de_json(update_data, application.bot)
-
-        # This is the recommended way to process updates asynchronously with the library
-        await application.process_update(update)
-
+        update = telegram.Update.de_json(request.get_json(), application.bot)
+        # Use asyncio.run() to execute the async process_update method
+        asyncio.run(application.process_update(update))
         return jsonify(ok=True)
     else:
-        return jsonify(ok=False, error="Bad request: expected JSON"), 400
-
-async def setup_bot():
-    """
-    An asynchronous function to set up the bot, including the webhook.
-    This should be run once when the application starts.
-    """
-    print("Setting up bot and webhook...")
-    try:
-        # The bot needs to be initialized before we can set the webhook
-        await application.bot.initialize()
-
-        # Set the webhook
-        await application.bot.set_webhook(url=WEBHOOK_URL)
-        print(f"Webhook set successfully to: {WEBHOOK_URL}")
-
-        # Retrieve webhook info to confirm
-        webhook_info = await application.bot.get_webhook_info()
-        print(f"Webhook info: {webhook_info}")
-
-    except Exception as e:
-        print(f"An error occurred during bot setup: {e}")
-
-# Note for PythonAnywhere deployment:
-# PythonAnywhere's WSGI server doesn't run an asyncio event loop by default.
-# The async functions in handlers.py and this webhook function will be
-# handled correctly by the `python-telegram-bot` library's `process_update` method,
-# which manages its own async context.
-
-# When running this file directly for local testing (not on PythonAnywhere),
-# you would typically run the setup_bot function.
-if __name__ == '__main__':
-    # This part is for local development and testing, not for production on PythonAnywhere.
-    # On PythonAnywhere, the WSGI server runs the Flask 'app' object.
-
-    # We use asyncio.run() to execute the async setup function
-    asyncio.run(setup_bot())
-
-    # Run the Flask app for local testing
-    # Use a different port to avoid conflicts if needed
-    app.run(port=5001, debug=True)
+        return jsonify(ok=False, error="Bad request"), 400

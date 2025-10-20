@@ -1,7 +1,6 @@
 import os
 import json
 import asyncio
-from dotenv import load_dotenv
 import telegram
 
 # Import project modules
@@ -9,129 +8,113 @@ import utils
 import wikipedia_data
 import apify_scraper
 import prediction_core
+import odds_api
+import market_scanner
 
-# Load environment variables
-load_dotenv()
-
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
-async def send_telegram_message(chat_id, text):
-    """Initializes the bot and sends a message to a specific chat ID."""
-    if not TELEGRAM_BOT_TOKEN:
-        print("Error: TELEGRAM_BOT_TOKEN is not configured.")
+async def send_telegram_message(chat_id, text, config: dict):
+    """Initializes and sends a message via the Telegram Bot API."""
+    telegram_token = config.get("TELEGRAM_BOT_TOKEN")
+    if not telegram_token:
+        print("Error: TELEGRAM_BOT_TOKEN not configured.")
         return
 
-    bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
+    bot = telegram.Bot(token=telegram_token)
     try:
         await bot.send_message(chat_id=chat_id, text=text, parse_mode='Markdown')
-        print(f"Successfully sent message to chat_id: {chat_id}")
     except Exception as e:
         print(f"Failed to send message to {chat_id}: {e}")
 
-def run_analysis_pipeline(match_details):
-    """
-    Executes the full, long-running analysis for a given match.
-    This function contains the blocking I/O operations.
-    """
-    home_team = match_details.get("home_team", "Unknown Team")
-    away_team = match_details.get("away_team", "Unknown Team")
+# --- Job-Specific Pipeline Functions ---
 
-    print(f"Processing analysis for: {home_team} vs {away_team}")
+def run_analysis_pipeline(job_data, config: dict):
+    """Executes the full analysis pipeline for a single match."""
+    home_team = job_data.get("home_team", "N/A")
+    away_team = job_data.get("away_team", "N/A")
 
-    # 1. Get historical data from Wikipedia
-    historical_summary = (
-        f"{wikipedia_data.get_team_history(home_team)}\n\n"
-        f"{wikipedia_data.get_team_history(away_team)}"
-    )
+    historical_summary = f"{wikipedia_data.get_team_history(home_team)}\n\n{wikipedia_data.get_team_history(away_team)}"
+    sentiment_summary = apify_scraper.get_twitter_sentiment_summary(f"{home_team} vs {away_team}", config)
+    odds_for_ai = utils.format_odds_for_ai(job_data.get('bookmakers', []))
 
-    # 2. Get Twitter sentiment summary from Apify
-    search_query = f"{home_team} vs {away_team}"
-    sentiment_summary = apify_scraper.get_twitter_sentiment_summary(search_query)
-
-    # 3. Format the odds data
-    odds_for_ai = utils.format_odds_for_ai(match_details.get('bookmakers', []))
-
-    # 4. Get the final prediction from Gemini AI
     prediction = prediction_core.get_ai_prediction(
-        home_team=home_team,
-        away_team=away_team,
-        odds_data=odds_for_ai,
-        sentiment_summary=sentiment_summary,
-        historical_summary=historical_summary,
+        home_team, away_team, odds_for_ai, sentiment_summary, historical_summary, config
     )
 
-    # 5. Parse the AI's JSON output and format the final message
     try:
-        # Clean the response to ensure it's valid JSON
-        cleaned_prediction_str = prediction.strip().replace('```json', '').replace('```', '')
-        ai_data = json.loads(cleaned_prediction_str)
-
-        result_message = (
+        ai_data = json.loads(prediction.strip().replace('```json', '').replace('```', ''))
+        return (
             f"--- **Outcome Projection Received** ---\n\n"
-            f"**Event:** {home_team} vs {away_team}\n\n"
+            f"**Event:** {home_team} vs {away_team}\n"
             f"**Prediction:** {ai_data.get('prediction', 'N/A')}\n"
-            f"**Confidence Score:** {ai_data.get('confidence_score', 'N/A')}\n"
-            f"**Assessed Risk Level:** {ai_data.get('risk_level', 'N/A')}\n\n"
-            f"**Oracle's Reasoning:**\n{ai_data.get('reasoning', 'No reasoning provided.')}"
+            f"**Confidence:** {ai_data.get('confidence_score', 'N/A')}\n"
+            f"**Risk:** {ai_data.get('risk_level', 'N/A')}\n\n"
+            f"**Reasoning:**\n{ai_data.get('reasoning', 'N/A')}"
         )
     except (json.JSONDecodeError, AttributeError):
-        # Fallback for non-JSON or malformed responses
-        result_message = (
-            f"--- **Oracle Transmission Error** ---\n\n"
-            f"The Oracle's response for **{home_team} vs {away_team}** was inconclusive or malformed.\n\n"
-            f"Raw output: {prediction}"
-        )
+        return f"--- **Oracle Transmission Error** ---\n\nRaw output: {prediction}"
 
-    return result_message
+def run_arbitrage_scan_pipeline(config: dict):
+    """Scans popular sports markets for arbitrage opportunities."""
+    popular_sports = ["soccer_usa_mls", "soccer_uefa_champs_league", "americanfootball_nfl", "basketball_nba"]
+    all_opportunities = []
+
+    for sport_key in popular_sports:
+        events = odds_api.get_odds(sport_key, config)
+        if not events:
+            continue
+        for event in events:
+            opportunities = market_scanner.find_arbitrage_opportunities(event.get('bookmakers', []))
+            if opportunities:
+                for opp in opportunities:
+                    opp['event'] = f"{event['home_team']} vs {event['away_team']}"
+                    all_opportunities.append(opp)
+
+    if not all_opportunities:
+        return "**Market Scan Complete:** No significant arbitrage opportunities found in popular markets."
+
+    report = "**Market Inefficiency Report:**\n\n"
+    for opp in all_opportunities:
+        report += f"**Event:** {opp['event']}\n**Profit:** {opp['profit_percentage']}%\n"
+        for outcome, details in opp['outcomes'].items():
+            report += f"- Bet on **{outcome}** with **{details['bookmaker']}** at **{details['price']}**\n"
+        report += "---\n"
+
+    return report
 
 async def main():
-    """
-    The main function for the worker script.
-    Fetches and processes jobs from the Supabase queue.
-    """
+    """Main function for the worker script."""
     print("--- Analysis Worker Started ---")
 
-    pending_jobs = utils.get_pending_jobs()
-
-    if not pending_jobs:
-        print("No pending analysis jobs found.")
+    bot_config = utils.get_all_settings()
+    if not bot_config:
+        print("CRITICAL: Could not load configuration from database.")
         return
 
-    print(f"Found {len(pending_jobs)} pending job(s).")
+    pending_jobs = utils.get_pending_jobs()
+    if not pending_jobs:
+        print("No pending jobs found.")
+        return
 
     for job in pending_jobs:
-        job_id, chat_id, match_details_json, status = job
-
-        print(f"Processing job ID: {job_id} for chat ID: {chat_id}")
+        job_id, chat_id, job_type, job_data_json, status = job
 
         try:
-            # Mark job as 'processing' to prevent other workers from picking it up
             utils.update_job_status(job_id, 'processing')
+            job_data = json.loads(job_data_json)
 
-            match_details = json.loads(match_details_json)
+            final_result = ""
+            if job_type == 'analysis':
+                final_result = run_analysis_pipeline(job_data, bot_config)
+            elif job_type == 'arbitrage_scan':
+                final_result = run_arbitrage_scan_pipeline(bot_config)
 
-            # Execute the long-running analysis
-            final_result = run_analysis_pipeline(match_details)
-
-            # Send the result to the user
-            await send_telegram_message(chat_id, final_result)
-
-            # Delete the job from the queue after successful completion
+            await send_telegram_message(chat_id, final_result, bot_config)
             utils.delete_job(job_id)
-            print(f"Successfully processed and deleted job ID: {job_id}")
-
         except Exception as e:
-            print(f"An error occurred while processing job {job_id}: {e}")
-            # Mark job as 'failed' to handle it later (e.g., retry logic)
+            print(f"Error processing job {job_id}: {e}")
             utils.update_job_status(job_id, 'failed')
-            # Optionally, notify the user of the failure
-            error_message = f"Sorry, there was an error processing your analysis request for {match_details.get('home_team')} vs {match_details.get('away_team')}. Please try again later."
-            await send_telegram_message(chat_id, error_message)
+            await send_telegram_message(chat_id, "Sorry, an error occurred while processing your request.", bot_config)
 
     print("--- Analysis Worker Finished ---")
 
-
 if __name__ == "__main__":
-    # This script is intended to be run as a scheduled task.
-    # The asyncio.run() function executes the main async function.
     asyncio.run(main())

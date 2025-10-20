@@ -25,14 +25,23 @@ cache_table = Table(
     Column('expiry', Float)
 )
 
-# Define the job queue table for asynchronous analysis tasks
+# Define the job queue table for asynchronous tasks
 job_queue_table = Table(
     'job_queue',
     metadata,
     Column('id', Integer, primary_key=True, autoincrement=True),
     Column('chat_id', String, nullable=False),
-    Column('match_details', Text, nullable=False), # Storing match details as a JSON string
+    Column('job_type', String, nullable=False, default='analysis'), # 'analysis' or 'arbitrage_scan'
+    Column('job_data', Text, nullable=False), # Storing job-specific data as a JSON string
     Column('status', String, default='pending') # e.g., pending, processing, done
+)
+
+# Define the settings table for storing API keys and other configurations
+settings_table = Table(
+    'settings',
+    metadata,
+    Column('key', String, primary_key=True),
+    Column('value', String, nullable=False)
 )
 
 # Create tables if they don't exist
@@ -40,15 +49,39 @@ metadata.create_all(engine)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# --- Caching Functions (Now using Supabase) ---
+# --- Configuration/Settings Functions ---
+
+def save_setting(key, value):
+    """Saves a single setting (like an API key) to the database."""
+    db_session = SessionLocal()
+    try:
+        from sqlalchemy.dialects.postgresql import insert
+        insert_stmt = insert(settings_table).values(key=key, value=value)
+        on_conflict_stmt = insert_stmt.on_conflict_do_update(
+            index_elements=['key'],
+            set_={'value': value}
+        )
+        db_session.execute(on_conflict_stmt)
+        db_session.commit()
+    finally:
+        db_session.close()
+
+def get_all_settings():
+    """Retrieves all settings from the database and returns them as a dict."""
+    db_session = SessionLocal()
+    try:
+        results = db_session.query(settings_table).all()
+        return {row.key: row.value for row in results}
+    finally:
+        db_session.close()
+
+# --- Caching Functions ---
 
 def cache_data(key, value, ttl):
     db_session = SessionLocal()
     try:
         expiry_time = time.time() + ttl
         serialized_value = json.dumps(value)
-
-        # Upsert logic for PostgreSQL
         from sqlalchemy.dialects.postgresql import insert
         insert_stmt = insert(cache_table).values(key=key, value=serialized_value, expiry=expiry_time)
         on_conflict_stmt = insert_stmt.on_conflict_do_update(
@@ -72,13 +105,14 @@ def get_cached_data(key):
 
 # --- Job Queue Functions ---
 
-def add_analysis_job(chat_id, match_details):
-    """Adds a new analysis job to the Supabase job queue."""
+def add_job_to_queue(chat_id, job_type, job_data):
+    """Adds a new job to the Supabase job queue."""
     db_session = SessionLocal()
     try:
         job = {
             "chat_id": str(chat_id),
-            "match_details": json.dumps(match_details),
+            "job_type": job_type,
+            "job_data": json.dumps(job_data),
             "status": "pending"
         }
         insert_stmt = job_queue_table.insert().values(**job)
@@ -91,8 +125,7 @@ def get_pending_jobs():
     """Retrieves all pending jobs from the queue."""
     db_session = SessionLocal()
     try:
-        jobs = db_session.query(job_queue_table).filter(job_queue_table.c.status == 'pending').all()
-        return jobs
+        return db_session.query(job_queue_table).filter(job_queue_table.c.status == 'pending').all()
     finally:
         db_session.close()
 
@@ -114,7 +147,7 @@ def delete_job(job_id):
     finally:
         db_session.close()
 
-# --- Data Formatting Utilities (Unchanged) ---
+# --- Data Formatting Utilities ---
 
 def format_odds_for_ai(bookmakers_data):
     best_odds = {}
