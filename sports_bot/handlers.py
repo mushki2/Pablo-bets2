@@ -1,190 +1,232 @@
-import asyncio
+import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
+from telegram.ext import (
+    ContextTypes,
+    ConversationHandler,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
+from functools import wraps
+import itertools
 
-# Import our custom modules
+# Import custom modules
 import odds_api
-import wikipedia_data
-import apify_scraper
-import prediction_core
 import market_scanner
 import utils
 
-# --- Main Menu and Start Command ---
+# --- Admin & Setup Conversation ---
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+def admin_only(func):
+    @wraps(func)
+    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        if str(update.effective_chat.id) != ADMIN_CHAT_ID:
+            await update.message.reply_text("Access denied.")
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapped
+
+(PASSWORD, ASK_ODDS_API, GET_ODDS_API, ASK_APIFY, GET_APIFY, ASK_GEMINI, GET_GEMINI) = range(7)
+
+@admin_only
+async def setup_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Enter setup password.")
+    return PASSWORD
+
+async def check_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    password = update.message.text
+    await update.message.delete()
+    if password == os.getenv("SETUP_PASSWORD"):
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Authenticated. Provide **Odds API Key**.")
+        return ASK_ODDS_API
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Authentication failed.")
+        return ConversationHandler.END
+
+async def get_and_save_key(update: Update, context: ContextTypes.DEFAULT_TYPE, key_name: str, next_prompt: str, next_state: int) -> int:
+    api_key = update.message.text
+    await update.message.delete()
+    utils.save_setting(key_name, api_key)
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"{key_name} saved.")
+    if next_prompt:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=next_prompt)
+    return next_state
+
+async def get_odds_api(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    return await get_and_save_key(update, context, "ODDS_API_KEY", "Next, **Apify API Token**.", ASK_APIFY)
+
+async def get_apify_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    return await get_and_save_key(update, context, "APIFY_API_TOKEN", "Next, **Gemini API Key**.", ASK_GEMINI)
+
+async def get_gemini_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    utils.save_setting("TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN"))
+    utils.save_setting("PA_USERNAME", os.getenv("PA_USERNAME"))
+    await get_and_save_key(update, context, "GEMINI_API_KEY", "", ConversationHandler.END)
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="Configuration complete! Restart the bot to apply.")
+    return ConversationHandler.END
+
+async def setup_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Setup canceled.")
+    return ConversationHandler.END
+
+setup_conversation = ConversationHandler(
+    entry_points=[CommandHandler("setup", setup_start)],
+    states={
+        PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, check_password)],
+        ASK_ODDS_API: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_odds_api)],
+        ASK_APIFY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_apify_token)],
+        ASK_GEMINI: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_gemini_key)],
+    },
+    fallbacks=[CommandHandler("cancel", setup_cancel)],
+)
+
+# --- Main UI Flow ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends a welcome message and the main menu when the /start command is issued."""
-    user = update.effective_user
-    welcome_message = (
-        f"Greetings, {user.first_name}. I am the **Strategic Oracle**.\n\n"
-        "I process vast amounts of market data, public sentiment, and historical records to provide advanced predictive analysis for sporting events.\n\n"
-        "Access my core functions below to begin."
-    )
-
-    await update.message.reply_html(
-        welcome_message,
-        reply_markup=main_menu_keyboard()
-    )
+    welcome_message = f"Greetings, {update.effective_user.first_name}. I am the **Strategic Oracle**."
+    await update.message.reply_html(welcome_message, reply_markup=main_menu_keyboard())
 
 def main_menu_keyboard():
-    """Returns the InlineKeyboardMarkup for the main menu."""
-    keyboard = [
-        [InlineKeyboardButton("📈 Access Sport Markets", callback_data='list_sports')],
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-def back_to_main_menu_button():
-    return InlineKeyboardButton("⬅️ Main Menu", callback_data='main_menu')
-
-# --- Central Callback Query Handler ---
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏆 Sports", callback_data='sports_menu'), InlineKeyboardButton("🔮 Prediction", callback_data='prediction_menu')],
+        [InlineKeyboardButton("💹 Arbitrage", callback_data='arbitrage_menu'), InlineKeyboardButton("⚙️ Settings", callback_data='settings_menu')],
+    ])
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Parses all CallbackQuery updates from inline keyboards."""
     query = update.callback_query
     await query.answer()
-
     data = query.data
+    config = context.bot_data
 
-    if data == 'list_sports':
-        await list_sports_handler(query, context)
+    # Main Menu Router
+    if data == 'main_menu':
+        await query.edit_message_text(text="**Oracle Mainframe:**", reply_markup=main_menu_keyboard(), parse_mode='Markdown')
+    elif data == 'sports_menu':
+        await sports_menu_handler(query, config)
+    elif data == 'prediction_menu':
+        await prediction_menu_handler(query, config)
+    elif data == 'arbitrage_menu':
+        await arbitrage_menu_handler(query)
+    elif data == 'settings_menu':
+        await settings_menu_handler(query)
+    elif data == 'run_setup':
+        await query.edit_message_text("To start secure setup, send the `/setup` command.")
+
+    # Sports Navigation
     elif data.startswith('sport_'):
-        sport_key = data.split('_', 1)[1]
-        await list_events_handler(query, context, sport_key)
-    elif data.startswith('match_'):
-        parts = data.split('_', 2)
-        sport_key, match_id = parts[1], parts[2]
-        await show_match_options_handler(query, context, sport_key, match_id)
-    elif data.startswith('analyze_'):
-        parts = data.split('_', 2)
-        sport_key, match_id = parts[1], parts[2]
-        await analyze_match_handler(query, context, sport_key, match_id)
-    elif data.startswith('arbitrage_'):
-        parts = data.split('_', 2)
-        sport_key, match_id = parts[1], parts[2]
-        await check_market_inefficiency_handler(query, context, sport_key, match_id)
-    elif data == 'main_menu':
-        await query.edit_message_text(
-            text="**Oracle Mainframe:**",
-            reply_markup=main_menu_keyboard(),
-            parse_mode='Markdown'
-        )
+        await leagues_menu_handler(query, config, data.split('_', 1)[1])
+    elif data.startswith('league_'):
+        _, sport_key, league_key = data.split('_', 2)
+        await matches_menu_handler(query, context, config, sport_key, league_key)
+    elif data.startswith('predict_'):
+        _, sport_key, match_id = data.split('_', 2)
+        await request_prediction_handler(query, config, sport_key, match_id)
 
-# --- Handler Implementations ---
-
-async def list_sports_handler(query, context):
-    """Displays a list of available sports markets."""
-    await query.edit_message_text("Accessing available sport markets...")
-    sports = odds_api.get_sports()
-
+async def sports_menu_handler(query, config):
+    sports = odds_api.get_sports(config)
     if not sports:
-        await query.edit_message_text("Market data is currently unavailable. Please try again later.")
+        await query.edit_message_text("Market data unavailable.")
+        return
+    keyboard = [[InlineKeyboardButton(s['title'], callback_data=f"sport_{s['key']}")] for s in sports]
+    keyboard.append([InlineKeyboardButton("⬅️ Main Menu", callback_data='main_menu')])
+    await query.edit_message_text("**Select a Sport Market:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def leagues_menu_handler(query, config, sport_key):
+    sports = odds_api.get_sports(config)
+    sport = next((s for s in sports if s['key'] == sport_key), None)
+    leagues = sport.get('groups', []) if sport else []
+    if not leagues:
+        await query.edit_message_text("No leagues found for this sport.")
+        return
+    keyboard = [[InlineKeyboardButton(l['title'], callback_data=f"league_{sport_key}_{l['key']}")] for l in leagues]
+    keyboard.append([InlineKeyboardButton("⬅️ Back to Sports", callback_data='sports_menu')])
+    await query.edit_message_text(f"**Select a League in {sport['title']}:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def matches_menu_handler(query, context, config, sport_key, league_key):
+    await query.edit_message_text("Fetching matches...")
+    events = odds_api.get_odds(sport_key, config)
+    league_matches = [e for e in events if e.get('group') == league_key] if events else []
+    if not league_matches:
+        await query.edit_message_text("No upcoming matches found for this league.")
         return
 
-    keyboard = []
-    for sport in sports:
-        keyboard.append([InlineKeyboardButton(sport['title'], callback_data=f"sport_{sport['key']}")])
+    await query.delete_message()
+    for match in league_matches[:5]:
+        odds_text = "Odds not available"
+        bookmaker = match.get('bookmakers', [])[0] if match.get('bookmakers') else {}
+        market = next((m for m in bookmaker.get('markets', []) if m['key'] == 'h2h'), None)
+        if market:
+            outcomes = market['outcomes']
+            odds_text = f"{outcomes[0]['name']}: {outcomes[0]['price']} | {outcomes[1]['name']}: {outcomes[1]['price']}"
+            if len(outcomes) > 2: odds_text += f" | Draw: {outcomes[2]['price']}"
 
-    keyboard.append([back_to_main_menu_button()])
+        match_text = f"**{match['home_team']} vs {match['away_team']}**\n_{odds_text}_"
+        keyboard = [[InlineKeyboardButton("🔮 Predict", callback_data=f"predict_{sport_key}_{match['id']}")]]
+        await context.bot.send_message(chat_id=query.effective_chat.id, text=match_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-    await query.edit_message_text(
-        "**Select a Market:**",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
+    nav_keyboard = [[InlineKeyboardButton("⬅️ Back to Leagues", callback_data=f"sport_{sport_key}")]]
+    await context.bot.send_message(chat_id=query.effective_chat.id, text="---", reply_markup=InlineKeyboardMarkup(nav_keyboard))
 
-async def list_events_handler(query, context, sport_key):
-    """Lists the upcoming events for a given sport."""
-    market_name = sport_key.replace('_', ' ').title()
-    await query.edit_message_text(f"Scanning for upcoming events in the {market_name} market...")
-
-    events = odds_api.get_odds(sport_key)
-
-    if not events:
-        await query.edit_message_text(f"No significant events found for the {market_name} market at this time.")
+async def request_prediction_handler(query, config, sport_key, match_id):
+    await query.edit_message_text("Request acknowledged. Queuing projection...")
+    events = odds_api.get_odds(sport_key, config)
+    match_details = next((m for m in events if m['id'] == match_id), None)
+    if not match_details:
+        await query.edit_message_text("Error: Could not queue job.")
         return
+    utils.add_job_to_queue(query.effective_chat.id, 'analysis', match_details)
 
-    keyboard = []
-    for event in events[:10]:
-        event_title = f"{event['home_team']} vs {event['away_team']}"
-        callback_data = f"match_{sport_key}_{event['id']}"
-        keyboard.append([InlineKeyboardButton(event_title, callback_data=callback_data)])
+async def prediction_menu_handler(query, config):
+    """Fetches and displays a curated list of popular upcoming matches."""
+    await query.edit_message_text("Fetching popular upcoming events...")
 
-    keyboard.append([InlineKeyboardButton("⬅️ Back to Markets", callback_data='list_sports')])
-
-    await query.edit_message_text(
-        f"**Upcoming Events: {market_name}**",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
-
-async def show_match_options_handler(query, context, sport_key, match_id):
-    """Shows analysis and market inefficiency options for a selected match."""
-    events = odds_api.get_odds(sport_key)
-    match = next((m for m in events if m['id'] == match_id), None)
-
-    if not match:
-        await query.edit_message_text("Error: Event data could not be retrieved.")
-        return
-
-    text = f"**Event:** {match['home_team']} vs {match['away_team']}\n\nSelect a strategic function:"
-
-    keyboard = [
-        [InlineKeyboardButton("🔮 Generate Outcome Projection", callback_data=f"analyze_{sport_key}_{match_id}")],
-        [InlineKeyboardButton("💹 Scan for Market Inefficiencies", callback_data=f"arbitrage_{sport_key}_{match_id}")],
-        [InlineKeyboardButton("⬅️ Back to Events", callback_data=f"sport_{sport_key}")]
+    popular_sports = [
+        "soccer_usa_mls",
+        "soccer_uefa_champs_league",
+        "americanfootball_nfl",
+        "basketball_nba",
     ]
 
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    all_popular_matches = []
+    for sport_key in popular_sports:
+        events = odds_api.get_odds(sport_key, config)
+        if events:
+            # Add sport_key to each match for the callback
+            for event in events:
+                event['sport_key'] = sport_key
+            all_popular_matches.extend(events)
 
-async def analyze_match_handler(query, context, sport_key, match_id):
-    """Adds an AI analysis job to the queue and notifies the user."""
-    await query.edit_message_text(
-        "**Request Acknowledged.**\n\n"
-        "Your request for an Outcome Projection has been queued. The Oracle is processing the data streams.\n\n"
-        "Results will be delivered via a new transmission in approximately 2-3 minutes."
-    )
-
-    events = odds_api.get_odds(sport_key)
-    match_details = next((m for m in events if m['id'] == match_id), None)
-
-    if not match_details:
-        await query.edit_message_text("Error: Could not retrieve full event details to queue the projection job.")
+    if not all_popular_matches:
+        await query.edit_message_text("Could not fetch popular matches at this time.")
         return
 
-    chat_id = query.effective_chat.id
+    # Sort matches by commence time
+    all_popular_matches.sort(key=lambda x: x['commence_time'])
 
-    utils.add_analysis_job(chat_id, match_details)
+    keyboard = []
+    for match in all_popular_matches[:10]: # Limit to 10 most recent popular matches
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{match['home_team']} vs {match['away_team']}",
+                callback_data=f"predict_{match['sport_key']}_{match['id']}"
+            )
+        ])
 
-    print(f"Successfully queued Outcome Projection job for chat_id: {chat_id} and match_id: {match_id}")
-
-async def check_market_inefficiency_handler(query, context, sport_key, match_id):
-    """Checks a specific match for market inefficiencies (arbitrage)."""
-    await query.edit_message_text("Scanning for market inefficiencies...")
-
-    events = odds_api.get_odds(sport_key)
-    match = next((m for m in events if m['id'] == match_id), None)
-    if not match:
-        await query.edit_message_text("Error: Event data not found.")
-        return
-
-    opportunities = market_scanner.find_arbitrage_opportunities(match.get('bookmakers', []))
-
-    home_team, away_team = match['home_team'], match['away_team']
-
-    if not opportunities:
-        message = f"**Market Scan Complete:** No significant pricing inefficiencies found for {home_team} vs {away_team}."
-    else:
-        opp = opportunities[0]
-        message = (
-            f"**Market Inefficiency Detected!**\n\n"
-            f"**Potential Profit Margin:** {opp['profit_percentage']}%\n\n"
-            "**Recommended Actions:**\n"
-        )
-        for outcome, details in opp['outcomes'].items():
-            message += f"- **{outcome}**: Place wager with **{details['bookmaker']}** at odds of **{details['price']}**\n"
+    keyboard.append([InlineKeyboardButton("⬅️ Main Menu", callback_data='main_menu')])
 
     await query.edit_message_text(
-        message,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Event Options", callback_data=f"match_{sport_key}_{match_id}")]]),
+        "**Popular Upcoming Events:**",
+        reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
+
+async def arbitrage_menu_handler(query):
+    utils.add_job_to_queue(query.effective_chat.id, 'arbitrage_scan', {})
+    await query.edit_message_text("Request acknowledged. A market-wide arbitrage scan is in progress.")
+
+async def settings_menu_handler(query):
+    if str(query.effective_chat.id) != ADMIN_CHAT_ID:
+        await query.edit_message_text("Restricted area.")
+        return
+    keyboard = [[InlineKeyboardButton("🔐 Run Secure Setup", callback_data='run_setup')]]
+    await query.edit_message_text("Admin settings:", reply_markup=InlineKeyboardMarkup(keyboard))
