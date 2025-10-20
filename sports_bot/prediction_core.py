@@ -1,6 +1,16 @@
 import requests
 import json
 
+def test_api_key(api_key: str) -> bool:
+    """Tests if the provided Gemini API key is valid."""
+    test_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    try:
+        response = requests.get(test_url)
+        response.raise_for_status()
+        return True
+    except requests.exceptions.RequestException:
+        return False
+
 def get_ai_prediction(home_team, away_team, odds_data, sentiment_summary, historical_summary, config: dict):
     """
     Queries the Gemini AI with structured data to get a match prediction.

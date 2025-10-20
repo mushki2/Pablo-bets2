@@ -31,6 +31,18 @@ def get_sports(config: dict):
         print(f"An error occurred while fetching sports: {e}")
         return None
 
+def test_api_key(api_key: str) -> bool:
+    """Tests if the provided Odds API key is valid."""
+    test_url = f"{API_BASE_URL}/sports"
+    params = {"apiKey": api_key}
+    try:
+        response = requests.get(test_url, params=params)
+        response.raise_for_status()
+        # A successful response (200 OK) means the key is valid
+        return True
+    except requests.exceptions.RequestException:
+        return False
+
 def get_odds(sport_key: str, config: dict):
     """
     Fetches odds for a specific sport.

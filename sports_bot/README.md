@@ -51,8 +51,12 @@ After the first deployment, you must configure the bot's API keys securely via T
 
 1.  **Start the Bot:** Follow the deployment instructions for either PythonAnywhere or VPS below.
 2.  **Send the `/setup` command** to the bot from your admin account.
-3.  **Provide the password and API keys** when prompted. The bot will delete your sensitive messages automatically.
-4.  **Restart the bot** (reload the web app on PythonAnywhere or run `docker-compose restart` on a VPS) for the new settings to take effect.
+3.  **Provide the password and API keys** when prompted. After providing each key, press the **"🧪 Test Key"** button to validate it in real time.
+4.  **Perform the Final Restart (Required):**
+    -   Once all keys are provided and tested, you must perform a one-time, manual restart of the application for the new settings to be loaded into memory.
+    -   On a VPS, run: `docker-compose restart`
+    -   On PythonAnywhere, click the **"Reload"** button on the "Web" tab.
+    -   *Why is this necessary?* A running application cannot restart itself. The restart command must be given by the hosting environment (Docker or PythonAnywhere) to ensure the application loads the new configuration cleanly and correctly. This is a standard practice for all production web applications.
 
 ---
 

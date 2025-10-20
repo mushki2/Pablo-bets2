@@ -3,7 +3,15 @@ import requests
 import time
 from dotenv import load_dotenv
 
-# This will be refactored to take config as an argument
+def test_api_key(api_key: str) -> bool:
+    """Tests if the provided Apify API token is valid."""
+    test_url = f"https://api.apify.com/v2/users/me?token={api_key}"
+    try:
+        response = requests.get(test_url)
+        response.raise_for_status()
+        return True
+    except requests.exceptions.RequestException:
+        return False
 
 def analyze_sentiment_and_summarize(tweets):
     """
