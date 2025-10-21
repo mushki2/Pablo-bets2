@@ -88,6 +88,7 @@ You will need API keys from the following services:
 
 -   **Telegram**: Talk to `@BotFather` on Telegram to create a new bot. Save the **Bot Token**.
 -   **The Odds API**: Sign up at [the-odds-api.com](https://the-odds-api.com) for a free key.
+-   **TheSportsDB**: Go to [TheSportsDB](https://www.thesportsdb.com/api.php) and become a $1/month Patreon sponsor to receive your full API key. This is required for the bot to check match results.
 -   **Apify**: Sign up at [apify.com](https://apify.com) for a free account and get your API token.
 -   **Google AI Studio**: Get your **Gemini API Key** from [Google AI Studio](https://aistudio.google.com/app/apikey).
 

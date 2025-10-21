@@ -6,7 +6,7 @@ import pytz
 from supabase import Client
 
 from utils import create_supabase_client
-from odds_api import get_scores # Note: Assumes a get_scores function in odds_api.py
+from scores_api import get_event_results # Use the new scores module
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -48,55 +48,64 @@ def main():
 
     logging.info(f"Found {len(pending_predictions)} pending predictions to check.")
 
-    # To minimize API calls, we can group checks by sport
-    sports_to_check = {pred['sport_key'] for pred in pending_predictions}
-    all_scores = {}
-    for sport in sports_to_check:
-        # Assumes get_scores fetches recent/completed game scores for a sport
-        scores = get_scores(sport)
-        if scores:
-            # Create a dict for easy lookup by match_id
-            all_scores[sport] = {score['id']: score for score in scores}
-
     for pred in pending_predictions:
         prediction_id = pred['id']
-        match_id = pred['match_id']
-        sport_key = pred['sport_key']
+        home_team = pred['home_team']
+        away_team = pred['away_team']
         predicted_winner = pred['predicted_winner']
 
-        # Check if the match start time has passed a reasonable threshold (e.g., 3 hours ago)
+        # The commence time is stored in ISO format with timezone
         match_time = datetime.fromisoformat(pred['match_commence_time']).replace(tzinfo=pytz.UTC)
+
+        # Check if enough time has passed for the game to likely be over
         if datetime.now(pytz.UTC) < match_time + timedelta(hours=3):
-            # Game is likely not over yet, skip for this run
+            logging.info(f"Skipping prediction {prediction_id}; match is likely still in progress.")
             continue
 
-        logging.info(f"Checking result for prediction {prediction_id} (Match ID: {match_id})")
+        logging.info(f"Checking result for prediction {prediction_id} ({home_team} vs {away_team}).")
 
-        match_score = all_scores.get(sport_key, {}).get(match_id)
+        # Format the date for TheSportsDB API
+        event_date_str = match_time.strftime('%Y-%m-%d')
 
-        if not match_score or not match_score.get('completed', False):
-            logging.warning(f"No completed score data found for match {match_id} yet.")
-            continue # No score data available yet
+        # Fetch results from the new scores API
+        event_result = get_event_results(team_name=home_team, event_date=event_date_str)
 
-        # Determine the actual winner from the scores
-        actual_winner = None
-        home_score = next((s['score'] for s in match_score['scores'] if s['name'] == pred['home_team']), None)
-        away_score = next((s['score'] for s in match_score['scores'] if s['name'] == pred['away_team']), None)
+        if not event_result:
+            logging.warning(f"No result found yet for prediction {prediction_id}. Will re-check on the next run.")
+            continue
 
-        if home_score is not None and away_score is not None:
+        # --- Determine the actual winner from the event result ---
+        home_score_str = event_result.get('intHomeScore')
+        away_score_str = event_result.get('intAwayScore')
+
+        # Ensure scores are valid numbers
+        if home_score_str is None or away_score_str is None:
+            logging.warning(f"Score data is incomplete for event of prediction {prediction_id}. Skipping.")
+            continue
+
+        try:
+            home_score = int(home_score_str)
+            away_score = int(away_score_str)
+
+            actual_winner = None
             if home_score > away_score:
-                actual_winner = pred['home_team']
+                actual_winner = event_result.get('strHomeTeam')
             elif away_score > home_score:
-                actual_winner = pred['away_team']
+                actual_winner = event_result.get('strAwayTeam')
             else:
                 actual_winner = "Draw"
 
-        if actual_winner:
-            # Compare and update status
-            new_status = "Correct" if predicted_winner == actual_winner else "Incorrect"
-            update_prediction_status(supabase, prediction_id, new_status)
-        else:
-            logging.error(f"Could not determine a winner for match {match_id} despite score data.")
+            # TheSportsDB might have slightly different team names.
+            # We compare with the predicted winner from our own DB.
+            if actual_winner:
+                # Basic name normalization to account for slight differences in team names between APIs
+                new_status = "Correct" if predicted_winner.lower() in actual_winner.lower() else "Incorrect"
+                update_prediction_status(supabase, prediction_id, new_status)
+            else:
+                logging.error(f"Could not determine a winner for prediction {prediction_id} despite having score data.")
+
+        except (ValueError, TypeError) as e:
+            logging.error(f"Error parsing scores for prediction {prediction_id}: {e}")
 
     logging.info("Result checker worker finished its run.")
 

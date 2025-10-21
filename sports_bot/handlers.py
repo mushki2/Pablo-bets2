@@ -78,6 +78,7 @@ def setup_keyboard():
     """Returns the keyboard for API key setup."""
     keyboard = [
         [InlineKeyboardButton("Set Odds API Key", callback_data='set_odds_api')],
+        [InlineKeyboardButton("Set TheSportsDB API Key", callback_data='set_thesportsdb_api')],
         [InlineKeyboardButton("Set Apify API Key", callback_data='set_apify_api')],
         [InlineKeyboardButton("Set Gemini API Key", callback_data='set_gemini_api')],
         [InlineKeyboardButton("Cancel", callback_data='cancel_setup')]
