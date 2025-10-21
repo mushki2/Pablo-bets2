@@ -1,0 +1,18 @@
+# Core Framework
+flask
+
+# Telegram Bot
+python-telegram-bot
+
+# API Clients
+requests
+beautifulsoup4
+wikipedia
+google-generativeai
+supabase
+
+# Environment & Config
+python-dotenv
+
+# Background Worker & Job Queue (using Supabase as queue)
+psycopg2-binary
